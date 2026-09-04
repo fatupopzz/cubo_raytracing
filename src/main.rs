@@ -129,11 +129,6 @@ fn a_color(v: Vec3) -> Color {
     )
 }
 
-/// Refleja `incidente` respecto de `normal`. Las dos entran normalizadas.
-fn reflejar(incidente: Vec3, normal: Vec3) -> Vec3 {
-    incidente - normal * 2.0 * dot(&incidente, &normal)
-}
-
 /// Degradado vertical del fondo. `t` va de 0 arriba a 1 abajo.
 fn color_de_fondo(t: f32) -> Vec3 {
     FONDO_ARRIBA * (1.0 - t) + FONDO_ABAJO * t
@@ -159,31 +154,20 @@ fn cast_ray(rayo: &Ray, objetos: &[&dyn RayIntersect], luz: &Luz, t_fondo: f32) 
         return color_de_fondo(t_fondo);
     }
 
-    // El color difuso lo pone la textura, evaluada en las uv que dejo la
-    // primitiva. El material solo aporta especular, brillo y albedo.
+    // El color de la superficie lo pone la funcion del material, evaluada
+    // en las uv que dejo la primitiva.
     let difuso = (impacto.material.textura)(impacto.u, impacto.v);
 
     let hacia_luz = normalize(&(luz.posicion - impacto.point));
-    let hacia_camara = normalize(&(-rayo.direction));
 
-    // Lambert: cuanto se inclina la cara respecto de la luz.
+    // Lambert y nada mas: en esta rama no hay especular, el brillo de cada
+    // cara depende solo de cuanto se inclina respecto de la luz.
     let intensidad_difusa = dot(&impacto.normal, &hacia_luz).max(0.0);
-    let termino_difuso =
-        difuso * intensidad_difusa * luz.intensidad * impacto.material.albedo[0];
-
-    // Phong: el reflejo de la luz apuntando al ojo.
-    let reflejo = reflejar(-hacia_luz, impacto.normal);
-    let intensidad_especular = dot(&reflejo, &hacia_camara)
-        .max(0.0)
-        .powf(impacto.material.brillo);
-    let termino_especular = impacto.material.especular
-        * intensidad_especular
-        * luz.intensidad
-        * impacto.material.albedo[1];
+    let termino_difuso = difuso * intensidad_difusa * luz.intensidad * impacto.material.albedo;
 
     let ambiente = difuso * AMBIENTE;
 
-    ambiente + termino_difuso.component_mul(&luz.color) + termino_especular.component_mul(&luz.color)
+    ambiente + termino_difuso.component_mul(&luz.color)
 }
 
 /// Genera los rayos primarios y llena el framebuffer.
@@ -223,7 +207,7 @@ fn render(fb: &mut Framebuffer, objetos: &[&dyn RayIntersect], luz: &Luz, camara
 fn main() {
     let (mut rl, thread) = raylib::init()
         .size(ANCHO as i32, ALTO as i32)
-        .title("Cubo con raytracing")
+        .title("Cubo con raytracing - luz difusa")
         .build();
 
     rl.set_target_fps(60);
@@ -232,12 +216,7 @@ fn main() {
     framebuffer.set_background_color(a_color(FONDO_ARRIBA));
     framebuffer.clear();
 
-    let material = Material::new(
-        Vec3::new(1.0, 1.0, 1.0),
-        50.0,
-        [0.9, 0.35],
-        texture::damero,
-    );
+    let material = Material::new(0.9, texture::plano);
 
     let cubo = Cube::new(Vec3::new(0.0, 0.0, 0.0), 2.0, material);
     let objetos: Vec<&dyn RayIntersect> = vec![&cubo];
