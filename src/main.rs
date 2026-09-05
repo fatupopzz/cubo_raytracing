@@ -18,14 +18,24 @@ const ALTO: usize = 600;
 /// Campo de vision vertical.
 const FOV: f32 = PI / 3.0;
 
-/// Piso de luz que le llega a toda cara, mire a donde mire. Sin esto las
-/// caras que no ven la luz quedan negras y el cubo pierde el volumen.
-const AMBIENTE: f32 = 0.15;
+/// Muestras por eje dentro de cada pixel. Con 2 salen 4 rayos por pixel y
+/// los bordes del cubo dejan de ser la escalera dura de un solo rayo.
+const MUESTRAS: usize = 2;
+
+/// Peso del ambiente. Sin un piso de luz, toda cara que no ve la luz queda
+/// negra y el cubo pierde el volumen.
+const AMBIENTE: f32 = 1.15;
+
+/// El ambiente no es plano: llega mas frio desde arriba y mas calido desde
+/// abajo, como si el entorno rebotara luz. Es barato y le saca el aire de
+/// maqueta al render.
+const AMBIENTE_CIELO: Vec3 = Vec3::new(0.34, 0.40, 0.52);
+const AMBIENTE_SUELO: Vec3 = Vec3::new(0.30, 0.25, 0.20);
 
 /// Colores del degradado de fondo, de arriba hacia abajo. Un fondo plano
 /// negro se comeria la silueta del cubo.
-const FONDO_ARRIBA: Vec3 = Vec3::new(0.05, 0.07, 0.15);
-const FONDO_ABAJO: Vec3 = Vec3::new(0.45, 0.52, 0.62);
+const FONDO_ARRIBA: Vec3 = Vec3::new(0.05, 0.07, 0.13);
+const FONDO_ABAJO: Vec3 = Vec3::new(0.42, 0.47, 0.56);
 
 // ---------- Luz ----------
 
@@ -112,7 +122,7 @@ impl Camara {
         // Topes: el pitch antes de los polos y el radio afuera del cubo.
         let limite = PI / 2.0 - 0.05;
         self.pitch = self.pitch.clamp(-limite, limite);
-        self.radio = self.radio.clamp(2.0, 25.0);
+        self.radio = self.radio.clamp(2.2, 25.0);
 
         movio
     }
@@ -139,6 +149,28 @@ fn color_de_fondo(t: f32) -> Vec3 {
     FONDO_ARRIBA * (1.0 - t) + FONDO_ABAJO * t
 }
 
+/// Inclina la normal segun la pendiente de la altura del material.
+///
+/// Es lo que hace que las grietas se vean hundidas y no pintadas: donde la
+/// altura cae, la normal se ladea y esa parte deja de mirar a la luz.
+/// Trabaja con la tangente y la bitangente que dejo la primitiva, asi que
+/// sirve para cualquier figura que las llene.
+fn normal_con_relieve(impacto: &Intersect) -> Vec3 {
+    if impacto.material.relieve <= 0.0 {
+        return impacto.normal;
+    }
+
+    let altura = impacto.material.altura;
+    let paso = 1.0 / 512.0;
+
+    let pendiente_u = altura(impacto.u + paso, impacto.v) - altura(impacto.u - paso, impacto.v);
+    let pendiente_v = altura(impacto.u, impacto.v + paso) - altura(impacto.u, impacto.v - paso);
+
+    let desvio = impacto.tangente * pendiente_u + impacto.bitangente * pendiente_v;
+
+    normalize(&(impacto.normal - desvio * impacto.material.relieve))
+}
+
 // ---------- Trazado ----------
 
 /// Lanza un rayo contra la escena y devuelve el color que ve.
@@ -160,19 +192,20 @@ fn cast_ray(rayo: &Ray, objetos: &[&dyn RayIntersect], luz: &Luz, t_fondo: f32) 
     }
 
     // El color difuso lo pone la textura, evaluada en las uv que dejo la
-    // primitiva. El material solo aporta especular, brillo y albedo.
+    // primitiva. El material solo aporta especular, brillo, albedo y
+    // relieve.
     let difuso = (impacto.material.textura)(impacto.u, impacto.v);
+    let normal = normal_con_relieve(&impacto);
 
     let hacia_luz = normalize(&(luz.posicion - impacto.point));
     let hacia_camara = normalize(&(-rayo.direction));
 
     // Lambert: cuanto se inclina la cara respecto de la luz.
-    let intensidad_difusa = dot(&impacto.normal, &hacia_luz).max(0.0);
-    let termino_difuso =
-        difuso * intensidad_difusa * luz.intensidad * impacto.material.albedo[0];
+    let intensidad_difusa = dot(&normal, &hacia_luz).max(0.0);
+    let termino_difuso = difuso * intensidad_difusa * luz.intensidad * impacto.material.albedo[0];
 
     // Phong: el reflejo de la luz apuntando al ojo.
-    let reflejo = reflejar(-hacia_luz, impacto.normal);
+    let reflejo = reflejar(-hacia_luz, normal);
     let intensidad_especular = dot(&reflejo, &hacia_camara)
         .max(0.0)
         .powf(impacto.material.brillo);
@@ -181,9 +214,18 @@ fn cast_ray(rayo: &Ray, objetos: &[&dyn RayIntersect], luz: &Luz, t_fondo: f32) 
         * luz.intensidad
         * impacto.material.albedo[1];
 
-    let ambiente = difuso * AMBIENTE;
+    // Al fondo de una grieta le entra menos luz del entorno que a la cara
+    // expuesta. Es una oclusion de a mentiras, sacada de la misma altura
+    // que el relieve, y es lo que le da profundidad a los surcos.
+    let oclusion = 0.35 + 0.65 * (impacto.material.altura)(impacto.u, impacto.v);
 
-    ambiente + termino_difuso.component_mul(&luz.color) + termino_especular.component_mul(&luz.color)
+    let cielo = 0.5 + 0.5 * normal.y;
+    let luz_de_entorno = AMBIENTE_CIELO * cielo + AMBIENTE_SUELO * (1.0 - cielo);
+    let ambiente = difuso.component_mul(&luz_de_entorno) * AMBIENTE * oclusion;
+
+    ambiente
+        + termino_difuso.component_mul(&luz.color) * oclusion
+        + termino_especular.component_mul(&luz.color)
 }
 
 /// Genera los rayos primarios y llena el framebuffer.
@@ -198,23 +240,35 @@ fn render(fb: &mut Framebuffer, objetos: &[&dyn RayIntersect], luz: &Luz, camara
 
     let origen = camara.posicion();
     let (derecha, arriba, adelante) = camara.base();
+    let muestras_por_pixel = (MUESTRAS * MUESTRAS) as f32;
 
     for y in 0..fb.height {
-        // La Y de pantalla crece hacia abajo y la del espacio normalizado
-        // hacia arriba: sin este signo la escena sale de cabeza.
-        let sy = (1.0 - 2.0 * (y as f32 + 0.5) / alto) * escala;
-        let t_fondo = y as f32 / alto;
-
         for x in 0..fb.width {
-            let sx = (2.0 * (x as f32 + 0.5) / ancho - 1.0) * aspecto * escala;
+            let mut acumulado = Vec3::zeros();
 
-            // El pixel se arma en la base de la camara de este cuadro.
-            let direccion = derecha * sx + arriba * sy + adelante;
-            let rayo = Ray::new(origen, direccion);
+            // Varias muestras repartidas dentro del pixel, promediadas al
+            // final: eso es el antialiasing.
+            for sub_y in 0..MUESTRAS {
+                for sub_x in 0..MUESTRAS {
+                    let px = x as f32 + (sub_x as f32 + 0.5) / MUESTRAS as f32;
+                    let py = y as f32 + (sub_y as f32 + 0.5) / MUESTRAS as f32;
 
-            let color = cast_ray(&rayo, objetos, luz, t_fondo);
+                    let sx = (2.0 * px / ancho - 1.0) * aspecto * escala;
+                    // La Y de pantalla crece hacia abajo y la del espacio
+                    // normalizado hacia arriba: sin este signo la escena
+                    // sale de cabeza.
+                    let sy = (1.0 - 2.0 * py / alto) * escala;
 
-            fb.set_current_color(a_color(color));
+                    // El pixel se arma en la base de la camara de este
+                    // cuadro.
+                    let direccion = derecha * sx + arriba * sy + adelante;
+                    let rayo = Ray::new(origen, direccion);
+
+                    acumulado += cast_ray(&rayo, objetos, luz, py / alto);
+                }
+            }
+
+            fb.set_current_color(a_color(acumulado / muestras_por_pixel));
             fb.point(x, y);
         }
     }
@@ -232,11 +286,15 @@ fn main() {
     framebuffer.set_background_color(a_color(FONDO_ARRIBA));
     framebuffer.clear();
 
+    // Piedra: casi nada de especular y un brillo ancho, porque la roca no
+    // es un espejo; el relieve es el que hace el trabajo pesado.
     let material = Material::new(
-        Vec3::new(1.0, 1.0, 1.0),
-        50.0,
-        [0.9, 0.35],
-        texture::damero,
+        Vec3::new(1.0, 0.98, 0.94),
+        22.0,
+        [0.95, 0.16],
+        texture::piedra,
+        texture::altura_piedra,
+        1.1,
     );
 
     let cubo = Cube::new(Vec3::new(0.0, 0.0, 0.0), 2.0, material);
@@ -244,11 +302,11 @@ fn main() {
 
     let luz = Luz {
         posicion: Vec3::new(5.0, 6.0, 6.0),
-        color: Vec3::new(1.0, 0.97, 0.92),
-        intensidad: 1.3,
+        color: Vec3::new(1.0, 0.96, 0.90),
+        intensidad: 1.25,
     };
 
-    let mut camara = Camara::new(Vec3::new(0.0, 0.0, 0.0), 0.6, 0.45, 7.0);
+    let mut camara = Camara::new(Vec3::new(0.0, 0.0, 0.0), 0.6, 0.45, 6.5);
 
     // Primer trazado antes de abrir el bucle: la textura de la ventana
     // tiene que nacer con la escena ya dibujada.

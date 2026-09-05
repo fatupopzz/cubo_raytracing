@@ -29,18 +29,36 @@ pub struct Intersect {
     pub normal: Vec3,
     pub u: f32,
     pub v: f32,
+    /// Direcciones en las que crecen u y v sobre la superficie. Las pone la
+    /// primitiva porque solo ella sabe como mapeo su textura, y son las que
+    /// dejan inclinar la normal con el relieve sin que el sombreado tenga
+    /// que saber contra que figura choco.
+    pub tangente: Vec3,
+    pub bitangente: Vec3,
     pub material: Material,
     pub is_intersecting: bool,
 }
 
 impl Intersect {
-    pub fn new(distance: f32, point: Vec3, normal: Vec3, u: f32, v: f32, material: Material) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        distance: f32,
+        point: Vec3,
+        normal: Vec3,
+        u: f32,
+        v: f32,
+        tangente: Vec3,
+        bitangente: Vec3,
+        material: Material,
+    ) -> Self {
         Intersect {
             distance,
             point,
             normal,
             u,
             v,
+            tangente,
+            bitangente,
             material,
             is_intersecting: true,
         }
@@ -55,6 +73,8 @@ impl Intersect {
             normal: Vec3::zeros(),
             u: 0.0,
             v: 0.0,
+            tangente: Vec3::zeros(),
+            bitangente: Vec3::zeros(),
             material: Material::vacio(),
             is_intersecting: false,
         }

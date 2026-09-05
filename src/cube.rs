@@ -36,23 +36,79 @@ impl Cube {
     /// contra el tamano de la caja. Asi cada cara recibe el rango 0..1
     /// completo y el damero se ve entero en cada una.
     pub fn uv(&self, punto: Vec3, normal: Vec3) -> (f32, f32) {
-        let tamano = self.max - self.min;
-        let local = punto - self.min;
+        let (eje_u, signo_u, eje_v, signo_v) = Cube::mapeo_de_cara(normal);
 
-        let (nx, ny, nz) = (normal.x.abs(), normal.y.abs(), normal.z.abs());
-
-        let (u, v) = if nx >= ny && nx >= nz {
-            // Cara perpendicular a X: sobre ella se mueven Z y Y.
-            (local.z / tamano.z, local.y / tamano.y)
-        } else if ny >= nz {
-            // Cara perpendicular a Y: sobre ella se mueven X y Z.
-            (local.x / tamano.x, local.z / tamano.z)
-        } else {
-            // Cara perpendicular a Z: sobre ella se mueven X y Y.
-            (local.x / tamano.x, local.y / tamano.y)
+        let coordenada = |eje: usize, signo: f32| {
+            let t = (punto[eje] - self.min[eje]) / (self.max[eje] - self.min[eje]);
+            let t = if signo > 0.0 { t } else { 1.0 - t };
+            t.clamp(0.0, 1.0)
         };
 
-        (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+        (coordenada(eje_u, signo_u), coordenada(eje_v, signo_v))
+    }
+
+    /// Cual de las seis caras es, o sea sobre que eje apunta la normal.
+    fn eje_dominante(normal: Vec3) -> usize {
+        let (nx, ny, nz) = (normal.x.abs(), normal.y.abs(), normal.z.abs());
+
+        if nx >= ny && nx >= nz {
+            0
+        } else if ny >= nz {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// Que eje recorre u en esta cara y en que sentido, e igual para v.
+    ///
+    /// Los sentidos no son arbitrarios: van dando la vuelta al cubo siempre
+    /// para el mismo lado. Si todas las caras midieran desde su esquina
+    /// minima, las caras vecinas quedarian espejadas y en cada arista se
+    /// veria una mariposa, el patron reflejandose contra si mismo. Asi, y
+    /// como el mosaico es continuo consigo mismo, el dibujo cruza la arista
+    /// sin cortarse.
+    fn mapeo_de_cara(normal: Vec3) -> (usize, f32, usize, f32) {
+        match Cube::eje_dominante(normal) {
+            // Caras de X: u recorre Z, v recorre Y.
+            0 => {
+                if normal.x > 0.0 {
+                    (2, -1.0, 1, 1.0)
+                } else {
+                    (2, 1.0, 1, 1.0)
+                }
+            }
+            // Caras de Y: u recorre X, v recorre Z.
+            1 => {
+                if normal.y > 0.0 {
+                    (0, 1.0, 2, 1.0)
+                } else {
+                    (0, 1.0, 2, -1.0)
+                }
+            }
+            // Caras de Z: u recorre X, v recorre Y.
+            _ => {
+                if normal.z > 0.0 {
+                    (0, 1.0, 1, 1.0)
+                } else {
+                    (0, -1.0, 1, 1.0)
+                }
+            }
+        }
+    }
+
+    /// Direcciones en las que crecen u y v sobre la cara. Tienen que
+    /// coincidir con el mapeo de `uv`, porque el relieve inclina la normal
+    /// justo en esos dos sentidos.
+    fn base_de_cara(normal: Vec3) -> (Vec3, Vec3) {
+        let (eje_u, signo_u, eje_v, signo_v) = Cube::mapeo_de_cara(normal);
+
+        let mut tangente = Vec3::zeros();
+        let mut bitangente = Vec3::zeros();
+        tangente[eje_u] = signo_u;
+        bitangente[eje_v] = signo_v;
+
+        (tangente, bitangente)
     }
 }
 
@@ -126,7 +182,17 @@ impl RayIntersect for Cube {
         normal[eje] = if ray.direction[eje] > 0.0 { -1.0 } else { 1.0 };
 
         let (u, v) = self.uv(punto, normal);
+        let (tangente, bitangente) = Cube::base_de_cara(normal);
 
-        Intersect::new(distancia, punto, normal, u, v, self.material)
+        Intersect::new(
+            distancia,
+            punto,
+            normal,
+            u,
+            v,
+            tangente,
+            bitangente,
+            self.material,
+        )
     }
 }
