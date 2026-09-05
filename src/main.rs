@@ -24,7 +24,7 @@ const MUESTRAS: usize = 2;
 
 /// Peso del ambiente. Sin un piso de luz, toda cara que no ve la luz queda
 /// negra y el cubo pierde el volumen.
-const AMBIENTE: f32 = 1.15;
+const AMBIENTE: f32 = 0.70;
 
 /// El ambiente no es plano: llega mas frio desde arriba y mas calido desde
 /// abajo, como si el entorno rebotara luz. Es barato y le saca el aire de
@@ -44,6 +44,16 @@ struct Luz {
     posicion: Vec3,
     color: Vec3,
     intensidad: f32,
+}
+
+impl Luz {
+    fn new(posicion: Vec3, color: Vec3, intensidad: f32) -> Self {
+        Luz {
+            posicion,
+            color,
+            intensidad,
+        }
+    }
 }
 
 // ---------- Camara ----------
@@ -177,7 +187,7 @@ fn normal_con_relieve(impacto: &Intersect) -> Vec3 {
 ///
 /// Solo habla con el trait `RayIntersect`, nunca con una primitiva
 /// concreta: agregar otra figura no obliga a tocar esta funcion.
-fn cast_ray(rayo: &Ray, objetos: &[&dyn RayIntersect], luz: &Luz, t_fondo: f32) -> Vec3 {
+fn cast_ray(rayo: &Ray, objetos: &[&dyn RayIntersect], luces: &[Luz], t_fondo: f32) -> Vec3 {
     let mut impacto = Intersect::empty();
 
     for objeto in objetos {
@@ -197,39 +207,55 @@ fn cast_ray(rayo: &Ray, objetos: &[&dyn RayIntersect], luz: &Luz, t_fondo: f32) 
     let difuso = (impacto.material.textura)(impacto.u, impacto.v);
     let normal = normal_con_relieve(&impacto);
 
-    let hacia_luz = normalize(&(luz.posicion - impacto.point));
     let hacia_camara = normalize(&(-rayo.direction));
 
-    // Lambert: cuanto se inclina la cara respecto de la luz.
-    let intensidad_difusa = dot(&normal, &hacia_luz).max(0.0);
-    let termino_difuso = difuso * intensidad_difusa * luz.intensidad * impacto.material.albedo[0];
-
-    // Phong: el reflejo de la luz apuntando al ojo.
-    let reflejo = reflejar(-hacia_luz, normal);
-    let intensidad_especular = dot(&reflejo, &hacia_camara)
-        .max(0.0)
-        .powf(impacto.material.brillo);
-    let termino_especular = impacto.material.especular
-        * intensidad_especular
-        * luz.intensidad
-        * impacto.material.albedo[1];
-
-    // Al fondo de una grieta le entra menos luz del entorno que a la cara
-    // expuesta. Es una oclusion de a mentiras, sacada de la misma altura
-    // que el relieve, y es lo que le da profundidad a los surcos.
+    // Al fondo de una grieta le entra menos luz que a la cara expuesta. Es
+    // una oclusion de a mentiras, sacada de la misma altura que el relieve,
+    // y es lo que le da profundidad a los surcos.
     let oclusion = 0.35 + 0.65 * (impacto.material.altura)(impacto.u, impacto.v);
+
+    // Cada luz aporta su Lambert y su Phong, y las contribuciones se suman.
+    // Sumar es lo correcto y no promediar: dos luces iluminan mas que una.
+    // Como no hay sombras, ninguna luz se tapa contra el propio cubo, pero
+    // tampoco hace falta: es un solo objeto convexo y la cara que no mira a
+    // una luz ya recibe cero por el coseno de Lambert.
+    let mut acumulado = Vec3::zeros();
+
+    for luz in luces {
+        let hacia_luz = normalize(&(luz.posicion - impacto.point));
+
+        // Lambert: cuanto se inclina la cara respecto de esta luz.
+        let intensidad_difusa = dot(&normal, &hacia_luz).max(0.0);
+        if intensidad_difusa <= 0.0 {
+            continue;
+        }
+
+        let termino_difuso =
+            difuso * intensidad_difusa * luz.intensidad * impacto.material.albedo[0];
+
+        // Phong: el reflejo de esta luz apuntando al ojo.
+        let reflejo = reflejar(-hacia_luz, normal);
+        let intensidad_especular = dot(&reflejo, &hacia_camara)
+            .max(0.0)
+            .powf(impacto.material.brillo);
+        let termino_especular = impacto.material.especular
+            * intensidad_especular
+            * luz.intensidad
+            * impacto.material.albedo[1];
+
+        acumulado += termino_difuso.component_mul(&luz.color) * oclusion
+            + termino_especular.component_mul(&luz.color);
+    }
 
     let cielo = 0.5 + 0.5 * normal.y;
     let luz_de_entorno = AMBIENTE_CIELO * cielo + AMBIENTE_SUELO * (1.0 - cielo);
     let ambiente = difuso.component_mul(&luz_de_entorno) * AMBIENTE * oclusion;
 
-    ambiente
-        + termino_difuso.component_mul(&luz.color) * oclusion
-        + termino_especular.component_mul(&luz.color)
+    ambiente + acumulado
 }
 
 /// Genera los rayos primarios y llena el framebuffer.
-fn render(fb: &mut Framebuffer, objetos: &[&dyn RayIntersect], luz: &Luz, camara: &Camara) {
+fn render(fb: &mut Framebuffer, objetos: &[&dyn RayIntersect], luces: &[Luz], camara: &Camara) {
     let ancho = fb.width as f32;
     let alto = fb.height as f32;
 
@@ -264,7 +290,7 @@ fn render(fb: &mut Framebuffer, objetos: &[&dyn RayIntersect], luz: &Luz, camara
                     let direccion = derecha * sx + arriba * sy + adelante;
                     let rayo = Ray::new(origen, direccion);
 
-                    acumulado += cast_ray(&rayo, objetos, luz, py / alto);
+                    acumulado += cast_ray(&rayo, objetos, luces, py / alto);
                 }
             }
 
@@ -300,17 +326,25 @@ fn main() {
     let cubo = Cube::new(Vec3::new(0.0, 0.0, 0.0), 2.0, material);
     let objetos: Vec<&dyn RayIntersect> = vec![&cubo];
 
-    let luz = Luz {
-        posicion: Vec3::new(5.0, 6.0, 6.0),
-        color: Vec3::new(1.0, 0.96, 0.90),
-        intensidad: 1.25,
-    };
+    // Tres luces puntuales, cada una con su color y su trabajo. El esquema
+    // es el de estudio: una manda, otra rellena la sombra y la tercera
+    // recorta el contorno desde atras.
+    let luces = vec![
+        // Clave: la fuerte y calida, arriba a la derecha y adelante.
+        Luz::new(Vec3::new(5.0, 6.0, 6.0), Vec3::new(1.0, 0.94, 0.85), 1.15),
+        // Relleno: fria y suave, del lado opuesto, para que la cara en
+        // sombra muestre su textura en vez de quedar negra.
+        Luz::new(Vec3::new(-7.0, 1.5, 4.0), Vec3::new(0.42, 0.58, 1.0), 0.68),
+        // Contra: calida y baja, desde atras. Es la que despega el cubo
+        // del fondo dibujandole un canto encendido.
+        Luz::new(Vec3::new(-3.5, -4.0, -7.0), Vec3::new(1.0, 0.62, 0.38), 0.62),
+    ];
 
     let mut camara = Camara::new(Vec3::new(0.0, 0.0, 0.0), 0.6, 0.45, 6.5);
 
     // Primer trazado antes de abrir el bucle: la textura de la ventana
     // tiene que nacer con la escena ya dibujada.
-    render(&mut framebuffer, &objetos, &luz, &camara);
+    render(&mut framebuffer, &objetos, &luces, &camara);
     let mut textura = rl
         .load_texture_from_image(&thread, &framebuffer.to_image())
         .expect("no se pudo crear la textura de la ventana");
@@ -321,7 +355,7 @@ fn main() {
         // Solo se vuelve a trazar si la camara se movio: el raytracing es
         // caro y la imagen no cambia sola.
         if camara.actualizar(&rl, delta) {
-            render(&mut framebuffer, &objetos, &luz, &camara);
+            render(&mut framebuffer, &objetos, &luces, &camara);
             textura = rl
                 .load_texture_from_image(&thread, &framebuffer.to_image())
                 .expect("no se pudo actualizar la textura de la ventana");
